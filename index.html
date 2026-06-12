@@ -4142,7 +4142,7 @@ function nsAnoAnalyze(rows){
     else if(minSim>=0.82&&(sharedVendor||priceClose))cat='verify';
     else if(finishVaries&&minSim>=0.45)cat='standardize';
     else if(minSim>=0.7)cat='review';
-    else cat='review';
+    else cat='different';
     if(cat==='merge')cats.merge.push({keep:keep,rows:grp.map(x=>({it:x,doThis:x===keep?'KEEP':'DELETE'})),
       rec:'Keep '+keep.name+' (OH='+keep.onhand+'); inactivate the other(s).',reason:'Same product — identical description + matching specs + same price'});
     else if(cat==='verify')cats.verify.push({keep:keep,rows:grp.map(x=>({it:x,doThis:x===keep?'VERIFY→KEEP':'VERIFY→DELETE'})),
@@ -4156,7 +4156,7 @@ function nsAnoAnalyze(rows){
     else cats.different.push({rows:grp.map(x=>({it:x,doThis:''}))});
     grp.forEach(x=>assigned[x.i]=1);
   });
-  let _gid=0;Object.keys(cats).forEach(k=>cats[k].forEach((g,idx)=>{g.no=idx+1;g.gid=++_gid;g.cat=k;if(g.remark==null)g.remark='';if(g.reviewed==null)g.reviewed=false;}));
+  let _gid=0;Object.keys(cats).forEach(k=>cats[k].forEach((g,idx)=>{g.no=idx+1;g.gid=++_gid;g.cat=k;g.autoCat=k;if(g.userCat===undefined)g.userCat=null;if(g.remark==null)g.remark='';if(g.reviewed==null)g.reviewed=false;}));
   const grpN=k=>cats[k].length;
   const deletes=cats.merge.reduce((s,g)=>s+g.rows.filter(r=>r.doThis==='DELETE').length,0);
   const fixItems=cats.fix.reduce((s,g)=>s+g.rows.filter(r=>r.doThis==='FIX FIELD').length,0);
@@ -4177,21 +4177,48 @@ const NSC=[
 ];
 const COLS=['Issue','Do This','Recommendation','Reason','Name','SKU','Display Name','Vendor Code','Original Part #','Base Price','On Hand','Last Modified','Description','Remarks'];
 function _rowVals(no,doThis,rec,reason,it,remark){return [no,doThis,rec,reason,it.name,it.sku,it.display,it.vendor,it.orig,it.price,it.onhand,it.modified,it.desc,remark||''];}
+/* ─── mode-aware classification view ───
+   AUTO mode shows the engine's full classification (DIFFERENT is populated).
+   MANUAL mode starts DIFFERENT empty: engine-"different" groups appear under
+   REVIEW until the reviewer explicitly marks a group DIFFERENT. The engine
+   output is never mutated — each group keeps its autoCat; manual choices live
+   in userCat, so toggling back to Auto always restores the full result. */
+function _effCat(g){
+  if(window._nsaMode==='manual'){
+    if(g.userCat)return g.userCat;
+    return g.autoCat==='different'?'review':g.autoCat;
+  }
+  return g.autoCat;
+}
+function _allGroups(a){const out=[];Object.keys(a.cats).forEach(k=>a.cats[k].forEach(g=>out.push(g)));return out;}
+function _viewCats(a){const v={};NSC.forEach(c=>v[c.k]=[]);_allGroups(a).forEach(g=>{const k=_effCat(g);(v[k]=v[k]||[]).push(g);});Object.keys(v).forEach(k=>v[k].forEach((g,i)=>g.no=i+1));return v;}
+function _resolve(g,cat){
+  if(cat===g.autoCat)return {rows:g.rows,rec:g.rec||'',reason:g.reason||''};
+  const items=g.rows.map(r=>r.it);const keep=items.slice().sort((x,y)=>y.onhand-x.onhand)[0];
+  if(cat==='merge')return {rows:g.rows.map(r=>({it:r.it,doThis:r.it===keep?'KEEP':'DELETE'})),rec:'Keep '+keep.name+' (OH='+keep.onhand+'); inactivate the other(s).',reason:'Same product — identical description + matching specs + same price'};
+  if(cat==='verify')return {rows:g.rows.map(r=>({it:r.it,doThis:r.it===keep?'VERIFY→KEEP':'VERIFY→DELETE'})),rec:'VERIFY same product (not a size/finish variant); if so keep '+keep.name+' (OH='+keep.onhand+').',reason:'Likely the same product — near-identical description'};
+  if(cat==='fix')return {rows:g.rows.map(r=>({it:r.it,doThis:'FIX FIELD'})),rec:'Correct the mismatched identifier.',reason:'Shared identifier across different items (data-entry error)'};
+  if(cat==='rewrite')return {rows:g.rows.map(r=>({it:r.it,doThis:'REWRITE'})),rec:'Add a size/spec-specific description to each.',reason:'Generic description shared across sizes'};
+  if(cat==='standardize')return {rows:g.rows.map(r=>({it:r.it,doThis:'STANDARDIZE'})),rec:'Distinct variants (finish/source) — standardize naming; do NOT delete.',reason:'Same product, different finish/source word'};
+  if(cat==='review')return {rows:g.rows.map(r=>({it:r.it,doThis:'REVIEW'})),rec:'Verify — if same product, merge; otherwise leave both.',reason:'Near-identical description — manual review'};
+  return {rows:g.rows.map(r=>({it:r.it,doThis:''})),rec:'',reason:''};
+}
 
 /* ─── report rendering (into a container) ─── */
 window._nsaTab='merge';window._nsaMode='auto';
-function _liveStats(a){const actionable=['merge','verify','fix','rewrite','standardize','review'].reduce((s,k)=>s+a.cats[k].length,0);const deletes=a.cats.merge.reduce((s,g)=>s+g.rows.filter(r=>r.doThis==='DELETE').length,0);const fixItems=a.cats.fix.reduce((s,g)=>s+g.rows.filter(r=>r.doThis==='FIX FIELD').length,0);return {actionable:actionable,deletes:deletes,fixItems:fixItems};}
+function _liveStats(a){const v=_viewCats(a);const actionable=['merge','verify','fix','rewrite','standardize','review'].reduce((s,k)=>s+(v[k]?v[k].length:0),0);let deletes=0,fixItems=0;_allGroups(a).forEach(g=>{const ec=_effCat(g);const d=_resolve(g,ec);if(ec==='merge')deletes+=d.rows.filter(r=>r.doThis==='DELETE').length;else if(ec==='fix')fixItems+=d.rows.filter(r=>r.doThis==='FIX FIELD').length;});return {actionable:actionable,deletes:deletes,fixItems:fixItems};}
 function nsaRenderInto(id,a){
   const el=document.getElementById(id);if(!el)return;if(!a){el.innerHTML='';return;}
+  const VC=_viewCats(a);
   const st=_liveStats(a);
   let h='<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;">';
   const card=(lbl,val,sub,col)=>'<div style="flex:1;min-width:140px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;border-top:3px solid '+(col||'var(--brand)')+';"><div style="font-size:10.5px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.4px;">'+lbl+'</div><div style="font-size:26px;font-weight:700;color:var(--text);line-height:1.1;margin-top:5px;">'+val+'</div><div style="font-size:11px;color:var(--muted);margin-top:3px;">'+sub+'</div></div>';
   h+=card('Total items',a.total,'in this file','#21385E');h+=card('Actionable issues',st.actionable,'across 6 types','#C99A2E');h+=card('Records to delete',st.deletes,'exact duplicates','#C0564E');h+=card('Fields to fix',st.fixItems,'data-entry errors','#C06A3A');
   h+='</div>';
   const mp=(m,lbl)=>'<button onclick="nsaMode(\''+m+'\')" style="padding:7px 14px;border-radius:8px;border:1px solid '+(window._nsaMode===m?'var(--brand)':'var(--border2)')+';background:'+(window._nsaMode===m?'var(--brand)':'var(--surface)')+';color:'+(window._nsaMode===m?'#fff':'var(--text2)')+';font-size:12px;font-weight:600;cursor:pointer;">'+lbl+'</button>';
-  h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;"><span style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.4px;">Mode</span>'+mp('auto','⚡ Auto')+mp('manual','✎ Manual review')+'<span style="font-size:11.5px;color:var(--muted);margin-left:auto;">'+(window._nsaMode==='manual'?'Confirm, reclassify or dismiss each group, and add remarks':'Read-only — engine classification')+'</span></div>';
-  h+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;">'+NSC.map(c=>{const n=a.cats[c.k].length;const act=window._nsaTab===c.k;return '<button onclick="nsaTab(\''+c.k+'\')" style="padding:7px 13px;border-radius:8px;border:1px solid '+(act?c.color:'var(--border2)')+';background:'+(act?c.color:'var(--surface)')+';color:'+(act?'#fff':'var(--text2)')+';font-size:12px;font-weight:600;cursor:pointer;">'+c.label+' <span style="opacity:.75;">'+n+'</span></button>';}).join('')+'</div>';
-  const c=NSC.find(x=>x.k===window._nsaTab)||NSC[0];const groups=a.cats[window._nsaTab]||[];
+  h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;"><span style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.4px;">Mode</span>'+mp('auto','⚡ Auto')+mp('manual','✎ Manual review')+'<span style="font-size:11.5px;color:var(--muted);margin-left:auto;">'+(window._nsaMode==='manual'?'Confirm or reclassify each group, and mark non-duplicates as DIFFERENT':'Read-only — full engine classification')+'</span></div>';
+  h+='<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;">'+NSC.map(c=>{const n=(VC[c.k]||[]).length;const act=window._nsaTab===c.k;return '<button onclick="nsaTab(\''+c.k+'\')" style="padding:7px 13px;border-radius:8px;border:1px solid '+(act?c.color:'var(--border2)')+';background:'+(act?c.color:'var(--surface)')+';color:'+(act?'#fff':'var(--text2)')+';font-size:12px;font-weight:600;cursor:pointer;">'+c.label+' <span style="opacity:.75;">'+n+'</span></button>';}).join('')+'</div>';
+  const c=NSC.find(x=>x.k===window._nsaTab)||NSC[0];const groups=VC[window._nsaTab]||[];
   h+='<div style="background:'+c.color+';color:#fff;padding:10px 14px;border-radius:9px 9px 0 0;font-size:12.5px;font-weight:600;">'+_e(c.title)+'</div>';
   if(window._nsaMode==='manual'){
     h+='<div style="border:1px solid var(--border);border-top:none;border-radius:0 0 9px 9px;padding:12px;background:var(--surface2);max-height:62vh;overflow:auto;">';
@@ -4207,7 +4234,7 @@ function nsaRenderInto(id,a){
       h+='</tbody></table>';
     } else {
       h+='<table style="border-collapse:collapse;font-size:11px;width:100%;"><thead><tr>'+COLS.map(x=>'<th style="position:sticky;top:0;background:#eef1f5;color:#21385E;border:1px solid var(--border);padding:6px 8px;text-align:left;white-space:nowrap;">'+x+'</th>').join('')+'</tr></thead><tbody>';
-      groups.forEach(g=>{g.rows.forEach(r=>{const it=r.it;const dl=r.doThis==='DELETE'||r.doThis==='VERIFY→DELETE';const kp=r.doThis==='KEEP'||r.doThis==='VERIFY→KEEP';const bg=dl?'background:#FBF0EF;':kp?'background:#EFF6F1;':'';const vals=_rowVals(g.no,r.doThis,g.rec,g.reason,it,g.remark);h+='<tr style="'+bg+'">'+vals.map((v,ci)=>'<td style="border:1px solid var(--border);padding:4px 8px;white-space:nowrap;max-width:320px;overflow:hidden;text-overflow:ellipsis;'+(ci===1?'font-weight:700;':'')+'">'+_e(v==null?'':v)+'</td>').join('')+'</tr>';});h+='<tr><td colspan="14" style="height:6px;border:none;"></td></tr>';});
+      groups.forEach(g=>{const d=_resolve(g,window._nsaTab);d.rows.forEach(r=>{const it=r.it;const dl=r.doThis==='DELETE'||r.doThis==='VERIFY→DELETE';const kp=r.doThis==='KEEP'||r.doThis==='VERIFY→KEEP';const bg=dl?'background:#FBF0EF;':kp?'background:#EFF6F1;':'';const vals=_rowVals(g.no,r.doThis,d.rec,d.reason,it,g.remark);h+='<tr style="'+bg+'">'+vals.map((v,ci)=>'<td style="border:1px solid var(--border);padding:4px 8px;white-space:nowrap;max-width:320px;overflow:hidden;text-overflow:ellipsis;'+(ci===1?'font-weight:700;':'')+'">'+_e(v==null?'':v)+'</td>').join('')+'</tr>';});h+='<tr><td colspan="14" style="height:6px;border:none;"></td></tr>';});
       h+='</tbody></table>';
     }
     h+='</div>';
@@ -4215,14 +4242,15 @@ function nsaRenderInto(id,a){
   el.innerHTML=h;
 }
 function _manualCard(g){
+  const ec=_effCat(g);const d=_resolve(g,ec);
   const cols=['Name','SKU','Display Name','Vendor','Orig Part #','Price','OH','Description'];
   let t='<table style="border-collapse:collapse;font-size:11px;width:100%;margin-bottom:8px;"><thead><tr>'+cols.map(x=>'<th style="background:#eef1f5;color:#21385E;border:1px solid var(--border);padding:4px 7px;text-align:left;white-space:nowrap;">'+x+'</th>').join('')+'</tr></thead><tbody>';
-  g.rows.forEach(r=>{const it=r.it;const dl=/DELETE/.test(r.doThis);const kp=/KEEP/.test(r.doThis);const bg=dl?'background:#FBF0EF;':kp?'background:#EFF6F1;':'';t+='<tr style="'+bg+'">'+[it.name,it.sku,it.display,it.vendor,it.orig,it.price==null?'':it.price,it.onhand,it.desc].map(v=>'<td style="border:1px solid var(--border);padding:3px 7px;white-space:nowrap;max-width:300px;overflow:hidden;text-overflow:ellipsis;">'+_e(v==null?'':v)+'</td>').join('')+'</tr>';});
+  d.rows.forEach(r=>{const it=r.it;const dl=/DELETE/.test(r.doThis);const kp=/KEEP/.test(r.doThis);const bg=dl?'background:#FBF0EF;':kp?'background:#EFF6F1;':'';t+='<tr style="'+bg+'">'+[it.name,it.sku,it.display,it.vendor,it.orig,it.price==null?'':it.price,it.onhand,it.desc].map(v=>'<td style="border:1px solid var(--border);padding:3px 7px;white-space:nowrap;max-width:300px;overflow:hidden;text-overflow:ellipsis;">'+_e(v==null?'':v)+'</td>').join('')+'</tr>';});
   t+='</tbody></table>';
-  const opts=NSC.map(c=>'<option value="'+c.k+'"'+(c.k===g.cat?' selected':'')+'>'+c.label+'</option>').join('');
+  const opts=NSC.map(c=>'<option value="'+c.k+'"'+(c.k===ec?' selected':'')+'>'+c.label+'</option>').join('');
   return '<div style="border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:10px;background:var(--surface);">'
    +'<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;"><div style="font-weight:700;font-size:12.5px;color:var(--text);">Group '+g.no+' · '+g.rows.length+' items</div>'+(g.reviewed?'<span style="font-size:9.5px;font-weight:700;color:#fff;background:#3C8C63;padding:2px 7px;border-radius:4px;">REVIEWED</span>':'')+'</div>'
-   +(g.rec?'<div style="font-size:11.5px;color:var(--muted);margin-bottom:8px;">'+_e(g.rec)+'</div>':'')
+   +(d.rec?'<div style="font-size:11.5px;color:var(--muted);margin-bottom:8px;">'+_e(d.rec)+'</div>':'')
    +t
    +'<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:4px;"><label style="font-size:11px;font-weight:600;color:var(--muted);">Belongs in</label>'
    +'<select onchange="nsaReclassify('+g.gid+',this.value)" style="padding:6px 10px;border-radius:7px;border:1px solid var(--border2);font-size:12px;background:var(--surface);color:var(--text);">'+opts+'</select>'
@@ -4240,25 +4268,26 @@ function _applyCat(g,cat){const items=g.rows.map(r=>r.it);const keep=items.slice
   else if(cat==='review'){g.rows.forEach(r=>r.doThis='REVIEW');g.rec='Verify — if same product, merge; otherwise leave both.';g.reason='Near-identical description — manual review';}
   else {g.rows.forEach(r=>r.doThis='');g.rec='';g.reason='';}
   g.cat=cat;}
-window.nsaReclassify=function(gid,toCat){const a=window._nsa;const f=_findGroup(gid);if(!f||f.k===toCat)return;a.cats[f.k].splice(f.i,1);_applyCat(f.g,toCat);f.g.reviewed=true;a.cats[toCat].push(f.g);Object.keys(a.cats).forEach(k=>a.cats[k].forEach((g,idx)=>g.no=idx+1));nsaRenderInto('nsa-report',a);};
+window.nsaReclassify=function(gid,toCat){const f=_findGroup(gid);if(!f)return;f.g.userCat=toCat;f.g.reviewed=true;nsaRenderInto('nsa-report',window._nsa);};
 window.nsaSetRemark=function(gid,val){const f=_findGroup(gid);if(f){f.g.remark=val;f.g.reviewed=true;}};
 
 /* ─── export to the 8-sheet workbook ─── */
 function nsAnoExport(){
   const a=window._nsa;if(!a){alert('Run the analysis first.');return;}
+  const VC=_viewCats(a);
   const st=_liveStats(a);
   const wb=XLSX.utils.book_new();const bd={top:{style:'thin',color:{rgb:'D5D9E0'}},bottom:{style:'thin',color:{rgb:'D5D9E0'}},left:{style:'thin',color:{rgb:'D5D9E0'}},right:{style:'thin',color:{rgb:'D5D9E0'}}};
   function S(ws,r,c,v,st){const ref=XLSX.utils.encode_cell({r:r,c:c});ws[ref]={v:v,t:typeof v==='number'?'n':'s',s:st};}
   /* Summary */
   const sd=[['MAGN — NetSuite Item Cleanup'],['Generated',a.when.toLocaleString()],[''],['Total items',a.total],['Cleanup issues (actionable)',st.actionable],['Records to delete now (MERGE)',st.deletes],['Fields to fix (FIX FIELD)',st.fixItems],[''],['Issue type','Count','Tab','What to do']];
-  NSC.forEach(c=>sd.push([c.label,a.cats[c.k].length,c.sheet,c.todo]));
+  NSC.forEach(c=>sd.push([c.label,(VC[c.k]||[]).length,c.sheet,c.todo]));
   const ws0=XLSX.utils.aoa_to_sheet(sd);ws0['!cols']=[{wch:30},{wch:12},{wch:22},{wch:42}];
   S(ws0,0,0,'MAGN — NetSuite Item Cleanup',{font:{bold:true,sz:14,color:{rgb:'1B2A4A'}}});
   for(let i=0;i<4;i++)S(ws0,8,i,['Issue type','Count','Tab','What to do'][i],{fill:{fgColor:{rgb:'21385E'}},font:{bold:true,color:{rgb:'FFFFFF'}},border:bd});
   XLSX.utils.book_append_sheet(wb,ws0,'Summary');
   /* category sheets */
   NSC.forEach(c=>{
-    const groups=a.cats[c.k];const rows=[];
+    const groups=VC[c.k]||[];const rows=[];
     if(c.k==='different'){
       rows.push(['Group','Name','SKU','Price','Description']);
       groups.forEach(g=>{g.rows.forEach(r=>{const it=r.it;rows.push([g.no,it.name,it.sku,it.price,it.desc]);});rows.push([]);});
@@ -4267,13 +4296,13 @@ function nsAnoExport(){
       XLSX.utils.book_append_sheet(wb,ws,c.sheet.substring(0,31));return;
     }
     rows.push([c.title]);rows.push(COLS.slice());
-    groups.forEach(g=>{g.rows.forEach(r=>{rows.push(_rowVals(g.no,r.doThis,g.rec,g.reason,r.it,g.remark));});rows.push([]);});
+    groups.forEach(g=>{const d=_resolve(g,c.k);d.rows.forEach(r=>{rows.push(_rowVals(g.no,r.doThis,d.rec,d.reason,r.it,g.remark));});rows.push([]);});
     const ws=XLSX.utils.aoa_to_sheet(rows);const NC=COLS.length;
     ws['!cols']=COLS.map(n=>({wch:n==='Recommendation'||n==='Reason'||n==='Description'?44:n==='Display Name'||n==='Remarks'?20:14}));
     ws['!merges']=[{s:{r:0,c:0},e:{r:0,c:NC-1}}];
     for(let i=0;i<NC;i++)S(ws,0,i,i===0?c.title:'',{fill:{fgColor:{rgb:c.color.replace('#','')}},font:{bold:true,color:{rgb:'FFFFFF'}},alignment:{horizontal:'left'}});
     for(let i=0;i<NC;i++)S(ws,1,i,COLS[i],{fill:{fgColor:{rgb:'EEF1F5'}},font:{bold:true,color:{rgb:'21385E'}},border:bd});
-    let ri=2;groups.forEach(g=>{g.rows.forEach(r=>{const dl=r.doThis==='DELETE'||r.doThis==='VERIFY→DELETE';const kp=r.doThis==='KEEP'||r.doThis==='VERIFY→KEEP';
+    let ri=2;groups.forEach(g=>{const d=_resolve(g,c.k);d.rows.forEach(r=>{const dl=r.doThis==='DELETE'||r.doThis==='VERIFY→DELETE';const kp=r.doThis==='KEEP'||r.doThis==='VERIFY→KEEP';
       const fill=dl?'FBF0EF':kp?'EFF6F1':'FFFFFF';for(let ci=0;ci<NC;ci++){const ref=XLSX.utils.encode_cell({r:ri,c:ci});if(ws[ref])ws[ref].s={fill:{fgColor:{rgb:fill}},font:{sz:9,bold:ci===1},border:bd};}ri++;});ri++;});
     XLSX.utils.book_append_sheet(wb,ws,c.sheet.substring(0,31));
   });
